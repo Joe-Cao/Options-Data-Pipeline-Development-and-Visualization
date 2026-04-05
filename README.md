@@ -8,7 +8,7 @@ Based on the required expiries and strikes, the model selects the desired data p
 
 Details can be found in the pick_points.sql file.
 
-## Arbitrage check
+## Data preprocessing
 
 This part computes quantities that are not directly provided in the raw data, such as implied volatility, delta, relative spread, and 25-delta skew.
 
