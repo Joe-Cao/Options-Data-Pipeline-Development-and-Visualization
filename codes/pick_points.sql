@@ -2,20 +2,20 @@ DROP TABLE IF EXISTS selected_options;
 
 CREATE TABLE selected_options AS
 WITH
--- 目标 T 网格
+-- Target T grid
 T_targets(t_target) AS (
   VALUES (0.02),(0.06),(0.10),(0.20),(0.30),(0.50),(1.00)
 ),
--- 短久期 k 网格
+-- Short-tenor k grid
 k_targets_short(k_target) AS (
   VALUES (-0.15),(-0.08),(-0.04),(0.00),(0.04),(0.08),(0.15)
 ),
--- 长久期 k 网格
+-- Long-tenor k grid
 k_targets_long(k_target) AS (
   VALUES (-0.20),(-0.12),(-0.06),(-0.03),(0.00),(0.03),(0.06),(0.12),(0.20)
 ),
 
--- 1) 标准化 + 计算 mid/spread/t/k
+-- 1) Normalize fields + compute mid/spread/t/k
 base AS (
   SELECT
     date(quote_date) AS quote_date,
@@ -40,7 +40,7 @@ base AS (
 enriched AS (
   SELECT
     quote_date, expiry, strike, cp,
-    -- 让 bid/ask<=0 的当作 NULL（和你 python 里 bid>0 & ask>0 的逻辑一致）
+    -- Treat bid/ask<=0 as NULL (consistent with the Python logic: bid>0 & ask>0)
     CASE WHEN bid_raw >= 0 THEN bid_raw END AS bid,
     CASE WHEN ask_raw >= 0 THEN ask_raw END AS ask,
     last_raw AS last,
@@ -50,10 +50,10 @@ enriched AS (
 
     spot_raw AS spot,
 
-    -- t: 年化到期（/365）
+    -- t: year-fraction to expiry (/365)
     (julianday(expiry) - julianday(quote_date)) / 365.0 AS t,
 
-    -- mid：优先 bid/ask，否则用 last
+    -- mid: prefer bid/ask, otherwise fall back to last
     CASE
       WHEN bid_raw > 0 AND ask_raw > 0 THEN 0.5*(bid_raw + ask_raw)
       ELSE last_raw
@@ -73,12 +73,12 @@ enriched2 AS (
     CASE WHEN mid > 0 AND spread_abs IS NOT NULL THEN spread_abs / mid END AS spread_pct,
 
     -- k = ln(K/S)
-    -- 依赖 SQLite 是否启用了数学函数 ln()
+    -- Depends on whether SQLite has the math function ln() enabled
     ln( max(strike, 1e-12) / max(spot, 1e-12) ) AS k
   FROM enriched
 ),
 
--- 2) 对每个 quote_date + T_target，选最接近的 expiry（t_selected）
+-- 2) For each quote_date + T_target, pick the nearest expiry (t_selected)
 day_exps AS (
   SELECT DISTINCT quote_date, expiry, t
   FROM enriched2
@@ -104,7 +104,7 @@ tenor_choice AS (
   WHERE rn = 1
 ),
 
--- 3) 根据 t_selected 选择短/长 k 网格
+-- 3) Choose short/long k grid based on t_selected
 grid AS (
   SELECT
     tc.quote_date, tc.t_target, tc.expiry, tc.t_selected,
@@ -123,7 +123,7 @@ grid AS (
     ON tc.t_selected > 0.08
 ),
 
--- 4) 对每个 (date, T_target, k_target) 在对应 expiry 下选 1 条最优
+-- 4) For each (date, T_target, k_target), pick the best single option under the selected expiry
 candidates AS (
   SELECT
     g.quote_date,
@@ -145,7 +145,7 @@ candidates AS (
     e.spot,
     e.k,
 
-    -- prefer_cp：k_target<0 选P，>0选C，=0 不偏好
+    -- prefer_cp: choose P when k_target<0, choose C when k_target>0; no preference when k_target=0
     CASE
       WHEN g.k_target < 0 THEN 'P'
       ELSE 'C'
@@ -153,7 +153,7 @@ candidates AS (
 
     abs(e.k - g.k_target) AS k_distance,
 
-    -- pref_flag：有偏好就优先该边；没有偏好则全都算“满足”
+    -- pref_flag: prioritize the preferred side; if no preference, treat both sides as acceptable
     CASE
       WHEN g.k_target = 0 THEN 1
       WHEN g.k_target < 0 AND e.cp = 'P' THEN 1
@@ -175,10 +175,10 @@ picked AS (
     row_number() OVER (
       PARTITION BY quote_date, t_target, k_target
       ORDER BY
-        pref_flag DESC,          -- 先满足偏好（如果当天某一边缺失，会自然 fallback）
-        k_distance ASC,          -- 再最接近 k_target
-        spread_pct ASC,          -- 再更小点差
-        total_volume DESC        -- 再更大成交量
+        pref_flag DESC,          -- Prefer the desired side first (naturally falls back if that side is missing)
+        k_distance ASC,          -- Then pick the closest to k_target
+        spread_pct ASC,          -- Then smaller relative spread
+        total_volume DESC        -- Then higher trading volume
     ) AS rn
   FROM candidates
 )
@@ -204,7 +204,7 @@ SELECT
   k_distance AS k_distance,
   prefer_cp,
 
-  -- liq_weight = 1/spread_pct，clip 下限0.001，上限1000
+  -- liq_weight = 1/spread_pct, clipped to [0.001, 1000]
   CASE
     WHEN spread_pct IS NULL THEN 1.0
     ELSE min(1000.0, 1.0 / max(spread_pct, 0.001))
